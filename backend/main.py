@@ -212,20 +212,6 @@ def recalculate_session_total(db: Session, session_id: int) -> float:
     return total
 
 
-def attach_unlinked_table_orders(db: Session, session: models.TableSession) -> None:
-    db.query(models.Order).filter(
-        models.Order.table_number == session.table_number,
-        models.Order.session_id == None,
-        models.Order.payment_status == "UNPAID",
-        models.Order.status != "Cancelled"
-    ).update({
-        "session_id": session.id,
-        "table_id": session.table_id
-    }, synchronize_session=False)
-    db.commit()
-    recalculate_session_total(db, session.id)
-
-
 def get_table_summary_dict(db: Session, table: models.DiningTable) -> dict:
     active_session = db.query(models.TableSession).filter(
         models.TableSession.table_number == table.table_number,
@@ -245,8 +231,6 @@ def get_table_summary_dict(db: Session, table: models.DiningTable) -> dict:
             "payment_status": "UNPAID",
             "started_at": None
         }
-
-    attach_unlinked_table_orders(db, active_session)
 
     orders = db.query(models.Order).filter(
         models.Order.session_id == active_session.id,
@@ -527,8 +511,6 @@ def get_table_session(table_number: int, db: Session = Depends(get_db)):
             "orders": []
         }
 
-    attach_unlinked_table_orders(db, session)
-
     orders = db.query(models.Order).options(
         joinedload(models.Order.items).joinedload(models.OrderItem.menu_item)
     ).filter(
@@ -562,9 +544,6 @@ def get_table_bill(table_number: int, db: Session = Depends(get_db)):
 
     if not session:
         raise HTTPException(status_code=404, detail="No session found for Table " + str(table_number))
-
-    if session.status == "ACTIVE":
-        attach_unlinked_table_orders(db, session)
 
     orders = db.query(models.Order).options(
         joinedload(models.Order.items).joinedload(models.OrderItem.menu_item)
@@ -620,7 +599,6 @@ async def close_table_session(table_number: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Table not found")
 
     if session:
-        attach_unlinked_table_orders(db, session)
         session.status = "CLOSED"
         session.payment_status = "PAID"
         session.closed_at = datetime.datetime.utcnow()

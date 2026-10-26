@@ -779,12 +779,9 @@ async function trackOrder(orderId) {
 // --- VENDOR DASHBOARD LOGIC ---
 
 let vendorOrders = [];
-let vendorTables = [];
-let selectedVendorTableNumber = null;
 
 async function initVendorDashboard() {
     loadVendorOrders();
-    loadVendorTables();
     loadMenuForManagement();
     populateVendorCategorySelect();
     generateVendorQR();
@@ -811,11 +808,6 @@ async function initVendorDashboard() {
         const data = JSON.parse(event.data);
         if (data.type === 'NEW_ORDER') {
             vendorOrders.unshift(data.order);
-            if (data.table) {
-                upsertVendorTable(data.table);
-            } else {
-                loadVendorTables();
-            }
             notifyNewVendorOrder(data.order);
             renderVendorOrders();
         } else if (data.type === 'STATUS_UPDATE') {
@@ -824,13 +816,8 @@ async function initVendorDashboard() {
                 order.status = data.status;
                 renderVendorOrders();
             }
-            loadVendorTables();
-        } else if (data.type === 'TABLE_UPDATE' && data.table) {
-            upsertVendorTable(data.table);
         }
     };
-
-    setInterval(loadVendorTables, 30000);
 }
 
 function notifyNewVendorOrder(order) {
@@ -1007,280 +994,6 @@ async function updateStatus(orderId, status) {
         // On error, reload to sync state
         loadVendorOrders();
     }
-}
-
-// --- DINING TABLES & RUNNING BILL LOGIC ---
-
-function formatMoney(amount) {
-    return `₹${Number(amount || 0).toFixed(0)}`;
-}
-
-function formatTableTime(value) {
-    if (!value) return 'Not started';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return 'Not started';
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function getTableStatusLabel(table) {
-    if (!table.active_session_id || table.order_count === 0) return 'Available';
-    if (table.pending_count > 0) return 'Preparing';
-    if (table.visual_state === 'red') return 'Bill Due';
-    return 'Active';
-}
-
-function upsertVendorTable(table) {
-    const normalized = {
-        ...table,
-        table_number: Number(table.table_number),
-        running_total: Number(table.running_total || 0),
-        order_count: Number(table.order_count || 0),
-        pending_count: Number(table.pending_count || 0),
-        visual_state: table.visual_state || 'gray'
-    };
-
-    const index = vendorTables.findIndex(t => t.table_number === normalized.table_number);
-    if (index >= 0) {
-        vendorTables[index] = normalized;
-    } else {
-        vendorTables.push(normalized);
-    }
-    vendorTables.sort((a, b) => a.table_number - b.table_number);
-    renderVendorTables();
-
-    if (selectedVendorTableNumber === normalized.table_number) {
-        openTableOrdersModal(normalized.table_number, true);
-    }
-}
-
-async function loadVendorTables() {
-    const grid = document.getElementById('vendor-tables-grid');
-    if (!grid) return;
-
-    try {
-        const response = await fetch(`${API_URL}/tables`);
-        if (!response.ok) throw new Error('Could not load tables');
-        vendorTables = await response.json();
-        renderVendorTables();
-    } catch (e) {
-        console.error('Failed to load dining tables', e);
-        grid.innerHTML = `
-            <div style="grid-column: 1/-1; text-align:center; padding:36px; color:#F87171; background:#1E293B; border:1px solid #334155; border-radius:18px;">
-                Could not load table bills. Check that the backend is running, then refresh.
-            </div>
-        `;
-    }
-}
-
-function renderVendorTables() {
-    const grid = document.getElementById('vendor-tables-grid');
-    if (!grid) return;
-
-    const tables = [...vendorTables].sort((a, b) => a.table_number - b.table_number);
-    if (tables.length === 0) {
-        grid.innerHTML = `
-            <div style="grid-column: 1/-1; text-align:center; padding:40px; color:var(--text-muted);">
-                No table data found yet.
-            </div>
-        `;
-        return;
-    }
-
-    grid.innerHTML = tables.map(table => {
-        const state = table.visual_state || 'gray';
-        const statusLabel = getTableStatusLabel(table);
-        const canOpenBill = table.active_session_id && table.order_count > 0;
-        const pendingText = table.pending_count > 0
-            ? `${table.pending_count} pending`
-            : (table.order_count > 0 ? 'All orders ready/served' : 'No active orders');
-
-        return `
-            <div class="table-card state-${escapeHtml(state)}">
-                <div>
-                    <div class="table-card-header">
-                        <div class="table-card-title"><span>🪑</span> Table ${table.table_number}</div>
-                        <span class="table-status-pill">${escapeHtml(statusLabel)}</span>
-                    </div>
-                    <div class="table-card-metrics">
-                        <div class="table-orders-count">
-                            ${table.order_count} order${table.order_count === 1 ? '' : 's'} &bull; ${escapeHtml(pendingText)}
-                        </div>
-                        <div class="table-running-total">${formatMoney(table.running_total)}</div>
-                        <div style="font-size:0.78rem; color:#64748B; margin-top:4px;">
-                            Session: ${table.active_session_id ? `#${table.active_session_id} since ${formatTableTime(table.started_at)}` : 'none'}
-                        </div>
-                    </div>
-                </div>
-                <div class="table-card-actions">
-                    <button class="btn-table-action btn-view-orders" onclick="openTableOrdersModal(${table.table_number})">
-                        View Orders
-                    </button>
-                    <button class="btn-table-action btn-view-bill" onclick="openTableBillModal(${table.table_number})" ${canOpenBill ? '' : 'disabled style="opacity:0.45; cursor:not-allowed;"'}>
-                        Bill
-                    </button>
-                </div>
-            </div>
-        `;
-    }).join('');
-}
-
-async function openTableOrdersModal(tableNumber, silent = false) {
-    selectedVendorTableNumber = tableNumber;
-    const modal = document.getElementById('table-orders-modal');
-    const title = document.getElementById('modal-table-title');
-    const subtitle = document.getElementById('modal-table-subtitle');
-    const body = document.getElementById('modal-table-body');
-    const total = document.getElementById('modal-table-total');
-    const payment = document.getElementById('modal-table-payment');
-
-    if (!modal || !body) return;
-    if (!silent) modal.style.display = 'flex';
-    if (title) title.innerText = `TABLE ${tableNumber}`;
-    body.innerHTML = '<div style="text-align:center; padding:28px; color:#94A3B8;">Loading table orders...</div>';
-
-    try {
-        const response = await fetch(`${API_URL}/tables/${tableNumber}/session`);
-        if (!response.ok) throw new Error('Could not load table session');
-        const session = await response.json();
-
-        if (subtitle) {
-            subtitle.innerText = session.has_active_session
-                ? `Active Session #${session.session_id} • Started: ${formatTableTime(session.started_at)}`
-                : 'No active session';
-        }
-        if (total) total.innerText = formatMoney(session.total_amount);
-        if (payment) {
-            payment.innerText = session.payment_status || 'UNPAID';
-            payment.style.color = session.payment_status === 'PAID' ? '#34D399' : '#F87171';
-        }
-
-        const orders = session.orders || [];
-        if (!session.has_active_session || orders.length === 0) {
-            body.innerHTML = `
-                <div style="text-align:center; padding:42px 20px; color:#94A3B8;">
-                    <div style="font-size:2rem; margin-bottom:8px;">🪑</div>
-                    <strong style="color:#F8FAFC;">No running orders for this table</strong>
-                    <p style="margin-top:6px;">New orders from Table ${tableNumber} will appear here.</p>
-                </div>
-            `;
-            return;
-        }
-
-        body.innerHTML = orders.map(order => {
-            const items = (order.items || []).map(item => {
-                const name = item.menu_item ? item.menu_item.name : 'Menu item';
-                const unitPrice = item.unit_price ?? (item.menu_item ? item.menu_item.price : 0);
-                return `
-                    <div style="display:flex; justify-content:space-between; gap:12px; color:#CBD5E1; font-size:0.9rem; padding:4px 0;">
-                        <span>${item.quantity}x ${escapeHtml(name)}</span>
-                        <span>${formatMoney(unitPrice * item.quantity)}</span>
-                    </div>
-                `;
-            }).join('');
-
-            return `
-                <div style="background:#0F172A; border:1px solid #334155; border-radius:14px; padding:16px; margin-bottom:12px;">
-                    <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:10px;">
-                        <div>
-                            <strong style="color:#F8FAFC; font-size:1.05rem;">Token #${order.token_number}</strong>
-                            <div style="color:#64748B; font-size:0.78rem;">${formatTableTime(order.timestamp)}</div>
-                        </div>
-                        <span class="badge badge-${String(order.status || '').toLowerCase()}" style="font-size:0.7rem;">${escapeHtml(order.status)}</span>
-                    </div>
-                    ${items}
-                    <div style="display:flex; justify-content:space-between; border-top:1px dashed #334155; margin-top:10px; padding-top:10px; font-weight:800;">
-                        <span>Total</span>
-                        <span style="color:#FF8533;">${formatMoney(order.total_amount)}</span>
-                    </div>
-                </div>
-            `;
-        }).join('');
-    } catch (e) {
-        console.error('Failed to load table orders', e);
-        body.innerHTML = '<div style="text-align:center; padding:32px; color:#F87171;">Could not load this table session.</div>';
-    }
-}
-
-function closeTableOrdersModal() {
-    selectedVendorTableNumber = null;
-    const modal = document.getElementById('table-orders-modal');
-    if (modal) modal.style.display = 'none';
-}
-
-function openTableBillFromModal() {
-    if (selectedVendorTableNumber) openTableBillModal(selectedVendorTableNumber);
-}
-
-async function openTableBillModal(tableNumber) {
-    selectedVendorTableNumber = tableNumber;
-    const modal = document.getElementById('table-bill-modal');
-    const receipt = document.getElementById('bill-receipt-content');
-    if (!modal || !receipt) return;
-
-    modal.style.display = 'flex';
-    receipt.innerHTML = '<div style="text-align:center; padding:20px;">Loading bill...</div>';
-
-    try {
-        const response = await fetch(`${API_URL}/tables/${tableNumber}/bill`);
-        if (!response.ok) throw new Error('Could not load bill');
-        const bill = await response.json();
-        const items = bill.items || [];
-
-        receipt.innerHTML = `
-            <div style="text-align:center;">
-                <h2 style="margin:0; font-size:1.35rem;">${escapeHtml(bill.restaurant_name || 'Food and Food')}</h2>
-                <p style="margin:4px 0 0;">Table ${bill.table_number} • Session #${bill.session_id}</p>
-                <p style="margin:4px 0 0; font-size:0.8rem;">${new Date(bill.generated_at).toLocaleString()}</p>
-            </div>
-            <div class="bill-divider"></div>
-            ${items.length > 0 ? items.map(item => `
-                <div class="bill-item-row">
-                    <span>${escapeHtml(item.name)} x${item.quantity}</span>
-                    <span>${formatMoney(item.subtotal)}</span>
-                </div>
-            `).join('') : '<p style="text-align:center;">No billable items.</p>'}
-            <div class="bill-divider"></div>
-            <div class="bill-item-row" style="font-weight:800; font-size:1.1rem;">
-                <span>Grand Total</span>
-                <span>${formatMoney(bill.grand_total)}</span>
-            </div>
-            <div style="margin-top:14px; text-align:center; font-size:0.85rem;">
-                Payment: ${escapeHtml(bill.payment_status || 'UNPAID')}
-            </div>
-        `;
-    } catch (e) {
-        console.error('Failed to load bill', e);
-        receipt.innerHTML = '<div style="text-align:center; color:#B91C1C;">Could not load bill for this table.</div>';
-    }
-}
-
-function closeTableBillModal() {
-    const modal = document.getElementById('table-bill-modal');
-    if (modal) modal.style.display = 'none';
-}
-
-async function closeTableFromModal() {
-    if (!selectedVendorTableNumber) return;
-    const tableNumber = selectedVendorTableNumber;
-    if (!confirm(`Mark Table ${tableNumber} as paid and close the session?`)) return;
-
-    try {
-        const response = await fetch(`${API_URL}/tables/${tableNumber}/close`, { method: 'POST' });
-        if (!response.ok) throw new Error('Could not close table');
-        const result = await response.json();
-        if (result.table) upsertVendorTable(result.table);
-        closeTableOrdersModal();
-        closeTableBillModal();
-        showToast(`Table ${tableNumber} closed`);
-        loadVendorTables();
-    } catch (e) {
-        console.error('Failed to close table', e);
-        showToast('Could not close this table');
-    }
-}
-
-function printBillReceipt() {
-    window.print();
 }
 
 // User's exact ordered category definitions with emojis
